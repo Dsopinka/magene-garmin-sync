@@ -9,7 +9,7 @@ import os
 from typing import Callable
 
 from .config import Config
-from .onelap import DEFAULT_HOSTS, AuthError, OnelapClient
+from .onelap import DEFAULT_HOST, AuthError, OnelapClient
 
 Log = Callable[[str], None]
 
@@ -20,7 +20,9 @@ def _onelap(cfg: Config, host: str | None = None, hash_pw: bool | None = None) -
         cfg.onelap_password,
         host or cfg.onelap_host or None,
         hash_password=cfg.onelap_hash_password if hash_pw is None else hash_pw,
-        auth_scheme=cfg.onelap_auth_scheme,
+        device_id=cfg.device_id,
+        timezone_name=cfg.timezone_name,
+        language=cfg.language,
     )
 
 
@@ -34,7 +36,7 @@ def probe(cfg: Config, log: Log) -> dict:
         log("Onelap account/password not set yet.")
         return {"ok": False, "error": "onelap credentials missing"}
 
-    hosts = [cfg.onelap_host] if cfg.onelap_host else DEFAULT_HOSTS
+    hosts = [cfg.onelap_host] if cfg.onelap_host else [DEFAULT_HOST]
     first_hash = cfg.onelap_hash_password
     for host in hosts:
         for hash_pw in (first_hash, not first_hash):

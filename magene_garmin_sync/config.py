@@ -61,6 +61,36 @@ class Config:
         return os.path.join(self.data_dir, "fit")
 
     @property
+    def timezone_name(self) -> str:
+        return os.environ.get("TZ") or "UTC"
+
+    @property
+    def language(self) -> str:
+        return os.environ.get("ONELAP_LANGUAGE", "en")
+
+    @property
+    def device_id(self) -> str:
+        """A stable per-install device id (persisted), so the backend sees one device."""
+        path = os.path.join(self.data_dir, "device_id")
+        try:
+            with open(path) as fh:
+                existing = fh.read().strip()
+            if existing:
+                return existing
+        except FileNotFoundError:
+            pass
+        import uuid
+
+        value = str(uuid.uuid4())
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(value)
+        except OSError:
+            pass
+        return value
+
+    @property
     def onelap_ready(self) -> bool:
         return bool(self.onelap_account and self.onelap_password)
 
