@@ -1,0 +1,9 @@
+# runtime data: credentials, tokens, state, downloaded FITs — never commit
+data/
+*.env
+.env
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,15 @@
+services:
+  magene-garmin-sync:
+    build: .
+    image: magene-garmin-sync:0.1.0
+    container_name: magene-garmin-sync
+    restart: unless-stopped
+    ports:
+      - "8787:8787"          # web control panel -> http://<server>:8787
+    environment:
+      # All credentials can be entered in the web UI instead of here.
+      # Anything set here pre-fills the UI (the UI's saved values win).
+      TZ: "${TZ:-America/Toronto}"
+    volumes:
+      # On Unraid, point this at /mnt/user/appdata/magene-garmin-sync
+      - ./data:/data
