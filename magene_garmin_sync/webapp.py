@@ -139,8 +139,21 @@ Garmin Connect. Everything is stored on this server only. <span id="ver"></span>
     <div class="btns" style="margin:14px 0 0">
       <button id="connect">Connect Strava</button>
     </div>
-    <div class="hint">Create a free API app at <a href="https://www.strava.com/settings/api" target="_blank">strava.com/settings/api</a>.
-    Set its <b>Authorization Callback Domain</b> to this server's address (shown below), save ID + secret here, then Connect.</div>
+    <div class="hint">One-click Connect works if your app's <b>Authorization Callback Domain</b> is this
+    server's address (shown at the bottom). Already have a Strava app for something else? Use the manual connect below &mdash; it won't touch that app's callback.</div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;color:var(--mut);font-size:13px">Connect manually (existing app / no-touch)</summary>
+      <label>Your app's redirect URI <span style="color:var(--mut)">(must match its callback domain)</span></label>
+      <input id="manual_redirect" type="text" placeholder="e.g. http://localhost or your app's callback URL">
+      <div class="hint"><a id="authlink" href="#" target="_blank" rel="noopener">1. Open Strava authorization &rarr;</a>
+      &nbsp;approve, then copy the <code>code</code> value from the address bar you land on.</div>
+      <label>2. Paste the authorization code</label>
+      <div class="row"><div><input id="manual_code" type="text" placeholder="code from the URL"></div>
+        <div style="flex:0 0 auto"><button id="exchange">Exchange</button></div></div>
+      <label style="margin-top:10px">or paste a refresh token <span style="color:var(--mut)">(scope activity:read_all)</span></label>
+      <div class="row"><div><input id="manual_token" type="password" placeholder="refresh token"></div>
+        <div style="flex:0 0 auto"><button id="usetoken" class="ghost">Use token</button></div></div>
+    </details>
   </div>
   <div class="card">
     <h2>Garmin Connect <span id="gc-pill" class="pill">password not set</span></h2>
@@ -211,7 +224,8 @@ function live(s){
   $("gc-pill").className="pill"+(c.garmin_password_set?" set":"");
   const dot=$("dot");
   dot.className="dot"+(s.busy?" busy":((c.strava_connected&&c.garmin_password_set)?" on":""));
-  ["save","probe","sync","connect"].forEach(b=>$(b).disabled=!!s.busy);
+  ["save","probe","sync","connect","exchange","usetoken"].forEach(b=>$(b).disabled=!!s.busy);
+  updateAuthLink();
   $("cbaddr").textContent=location.protocol+"//"+location.host+"/strava/callback  (callback domain: "+location.hostname+")";
   const log=$("log");const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-20;
   log.textContent=(s.logs||[]).join("\\n");
@@ -242,6 +256,28 @@ $("probe").onclick=()=>saveThen("/api/probe");
 $("sync").onclick=()=>saveThen("/api/sync");
 $("connect").onclick=async()=>{await post("/api/config",collect());
   $("strava_client_secret").value="";window.location="/strava/connect";};
+function updateAuthLink(){
+  const cid=$("strava_client_id").value.trim();
+  const ruri=$("manual_redirect").value.trim();
+  const a=$("authlink");
+  if(cid&&ruri){
+    a.href="https://www.strava.com/oauth/authorize?client_id="+encodeURIComponent(cid)+
+      "&redirect_uri="+encodeURIComponent(ruri)+"&response_type=code&scope=activity:read_all&approval_prompt=force";
+    a.style.opacity="1";a.style.pointerEvents="auto";
+  }else{a.href="#";a.style.opacity=".5";}
+}
+$("strava_client_id").addEventListener("input",updateAuthLink);
+$("manual_redirect").addEventListener("input",updateAuthLink);
+$("exchange").onclick=async()=>{
+  const code=$("manual_code").value.trim(); if(!code)return;
+  await post("/api/config",collect()); $("strava_client_secret").value="";
+  await post("/api/strava/exchange",{code}); $("manual_code").value=""; refresh();
+};
+$("usetoken").onclick=async()=>{
+  const t=$("manual_token").value.trim(); if(!t)return;
+  await post("/api/config",collect()); $("strava_client_secret").value="";
+  await post("/api/strava/token",{refresh_token:t}); $("manual_token").value=""; refresh();
+};
 refresh();setInterval(refresh,1500);
 </script>
 </body></html>"""
@@ -331,6 +367,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": STATE.run_async("probe", STATE.do_probe)})
         elif self.path == "/api/sync":
             self._json({"ok": STATE.run_async("sync", STATE.do_sync)})
+        elif self.path == "/api/strava/exchange":
+            code = str(self._read_json().get("code") or "").strip()
+            if not STATE.cfg.strava_ready:
+                STATE.log("Exchange: set Strava Client ID and Secret first.")
+            elif not code:
+                STATE.log("Exchange: no code provided.")
+            else:
+                try:
+                    tokens = StravaClient.exchange_code(
+                        STATE.cfg.strava_client_id, STATE.cfg.strava_client_secret, code
+                    )
+                    STATE.cfg.set_strava_tokens(tokens)
+                    STATE.log("Strava connected (code exchanged).")
+                except Exception as exc:  # noqa: BLE001
+                    STATE.log(f"Exchange failed: {exc}")
+            self._json({"ok": True})
+        elif self.path == "/api/strava/token":
+            token = str(self._read_json().get("refresh_token") or "").strip()
+            if token:
+                STATE.cfg.set_strava_tokens({"refresh_token": token})
+                STATE.log("Strava refresh token saved.")
+            else:
+                STATE.log("No refresh token provided.")
+            self._json({"ok": True})
         else:
             self._send(404, b"not found", "text/plain")
 
