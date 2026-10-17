@@ -184,15 +184,18 @@ Credentials are stored on this server only. <span id="ver"></span></p>
 
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["onelap_account","onelap_host","garmin_email","garmin_mfa","poll_seconds","lookback_pages"];
+// Text fields the user owns: filled once on load, never overwritten by polling.
+const TEXT=["onelap_account","garmin_email","garmin_mfa","poll_seconds","lookback_pages"];
+// Server-discovered field: may update live, but only while you're not editing it.
+const SERVER=["onelap_host"];
 const CHECKS=["onelap_hash_password","auto_sync"];
-let dirtyGuard=false;
+let loaded=false;
 
 function collect(){
   const o={};
-  FIELDS.forEach(f=>o[f]=$(f).value);
+  TEXT.concat(SERVER).forEach(f=>o[f]=$(f).value);
   CHECKS.forEach(f=>o[f]=$(f).checked);
-  // only send passwords if the user typed something
+  // only send passwords if the user typed something this time
   ["onelap_password","garmin_password"].forEach(f=>{if($(f).value)o[f]=$(f).value;});
   return o;
 }
@@ -201,20 +204,23 @@ async function post(path,body){
     body:JSON.stringify(body||{})});
   return r.json();
 }
-function applyConfig(c){
-  if(dirtyGuard)return;
-  FIELDS.forEach(f=>{if(document.activeElement!==$(f)&&c[f]!=null)$(f).value=c[f];});
-  CHECKS.forEach(f=>{if(document.activeElement!==$(f))$(f).checked=!!c[f];});
+function fillAll(c){
+  TEXT.concat(SERVER).forEach(f=>{if(c[f]!=null)$(f).value=c[f];});
+  CHECKS.forEach(f=>{$(f).checked=!!c[f];});
+}
+function live(s){
+  const c=s.config;
+  $("ver").textContent="v"+s.version;
+  // Reflect server-discovered host/hash from a Test, but never while focused.
+  SERVER.forEach(f=>{if(document.activeElement!==$(f)&&c[f])$(f).value=c[f];});
+  if(document.activeElement!==$("onelap_hash_password"))
+    $("onelap_hash_password").checked=!!c.onelap_hash_password;
   $("ol-pill").textContent=c.onelap_password_set?"password set":"password not set";
   $("ol-pill").className="pill"+(c.onelap_password_set?" set":"");
   $("gc-pill").textContent=c.garmin_password_set?"password set":"password not set";
   $("gc-pill").className="pill"+(c.garmin_password_set?" set":"");
-}
-function render(s){
-  $("ver").textContent="v"+s.version;
-  applyConfig(s.config);
   const dot=$("dot");
-  dot.className="dot"+(s.busy?" busy":(s.config.onelap_password_set&&s.config.garmin_password_set?" on":""));
+  dot.className="dot"+(s.busy?" busy":(c.onelap_password_set&&c.garmin_password_set?" on":""));
   ["save","probe","sync"].forEach(b=>$(b).disabled=!!s.busy);
   const log=$("log");const atBottom=log.scrollTop+log.clientHeight>=log.scrollHeight-20;
   log.textContent=(s.logs||[]).join("\\n");
@@ -229,15 +235,22 @@ function render(s){
   $("warn").textContent = s.last_probe&&!s.last_probe.ok ? ("Last test: "+(s.last_probe.error||"")) :
     (s.last_sync&&s.last_sync.error? ("Last sync: "+s.last_sync.error):"");
 }
-async function refresh(){try{render(await (await fetch("/api/status")).json());}catch(e){}}
-$("save").onclick=async()=>{dirtyGuard=true;await post("/api/config",collect());
-  ["onelap_password","garmin_password"].forEach(f=>$(f).value="");dirtyGuard=false;refresh();};
-$("probe").onclick=async()=>{dirtyGuard=true;await post("/api/config",collect());
-  ["onelap_password","garmin_password"].forEach(f=>$(f).value="");dirtyGuard=false;
-  await post("/api/probe");refresh();};
-$("sync").onclick=async()=>{dirtyGuard=true;await post("/api/config",collect());
-  ["onelap_password","garmin_password"].forEach(f=>$(f).value="");dirtyGuard=false;
-  await post("/api/sync");refresh();};
+async function refresh(){
+  try{
+    const s=await (await fetch("/api/status")).json();
+    if(!loaded){fillAll(s.config);loaded=true;}
+    live(s);
+  }catch(e){}
+}
+async function saveThen(path){
+  await post("/api/config",collect());
+  ["onelap_password","garmin_password"].forEach(f=>$(f).value="");
+  if(path)await post(path);
+  refresh();
+}
+$("save").onclick=()=>saveThen(null);
+$("probe").onclick=()=>saveThen("/api/probe");
+$("sync").onclick=()=>saveThen("/api/sync");
 refresh();setInterval(refresh,1500);
 </script>
 </body></html>"""
