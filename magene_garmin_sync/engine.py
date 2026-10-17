@@ -1,7 +1,7 @@
-"""Shared probe/sync logic, used by both the CLI and the web control panel.
+"""Shared probe/sync logic for the Strava -> Garmin bridge.
 
-Every function takes a ``log`` callback so callers can stream progress (the web
-UI pipes it to the live log; the CLI pipes it to the logger).
+Used by both the CLI and the web control panel. Every function takes a ``log``
+callback so callers can stream progress.
 """
 from __future__ import annotations
 
@@ -9,119 +9,126 @@ import os
 from typing import Callable
 
 from .config import Config
-from .onelap import DEFAULT_HOST, AuthError, OnelapClient
+from .strava import StravaAuthError, StravaClient
+from . import tcx
 
 Log = Callable[[str], None]
 
 
-def _onelap(cfg: Config, host: str | None = None, hash_pw: bool | None = None) -> OnelapClient:
-    return OnelapClient(
-        cfg.onelap_account,
-        cfg.onelap_password,
-        host or cfg.onelap_host or None,
-        hash_password=cfg.onelap_hash_password if hash_pw is None else hash_pw,
-        device_id=cfg.device_id,
-        timezone_name=cfg.timezone_name,
-        language=cfg.language,
+def _strava(cfg: Config) -> StravaClient:
+    return StravaClient(
+        cfg.strava_client_id,
+        cfg.strava_client_secret,
+        cfg.strava_refresh_token,
+        cfg.strava_access_token,
+        cfg.strava_expires_at,
+        on_token=cfg.set_strava_tokens,
     )
 
 
+def _wanted(cfg: Config, act) -> bool:
+    if cfg.rides_only and not act.is_ride:
+        return False
+    if act.is_virtual and not cfg.include_virtual:
+        return False
+    if cfg.device_filter and cfg.device_filter.lower() not in (act.device_name or "").lower():
+        return False
+    return True
+
+
 def probe(cfg: Config, log: Log) -> dict:
-    """Find a host/auth combo that logs in and list a few recent rides.
+    """Confirm the Strava connection and show a few recent rides with device names."""
+    if not cfg.strava_ready:
+        return {"ok": False, "error": "Strava client ID/secret not set"}
+    if not cfg.strava_connected:
+        return {"ok": False, "error": "not connected to Strava yet (use Connect Strava)"}
 
-    Returns {ok, host, hash_password, rides:[...]} and, on success, writes the
-    discovered host/hash_password back into cfg (caller may persist).
-    """
-    if not cfg.onelap_ready:
-        log("Onelap account/password not set yet.")
-        return {"ok": False, "error": "onelap credentials missing"}
+    client = _strava(cfg)
+    try:
+        who = client.athlete_name()
+    except StravaAuthError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{exc}"}
 
-    hosts = [cfg.onelap_host] if cfg.onelap_host else [DEFAULT_HOST]
-    first_hash = cfg.onelap_hash_password
-    for host in hosts:
-        for hash_pw in (first_hash, not first_hash):
-            log(f"trying host={host} hash_password={hash_pw} ...")
-            client = _onelap(cfg, host, hash_pw)
-            try:
-                client.login()
-            except AuthError as exc:
-                log(f"  rejected: {exc}")
-                continue
-            except Exception as exc:  # noqa: BLE001
-                log(f"  error: {exc}")
-                continue
-            log(f"  signed in. host={host} hash_password={hash_pw}")
-            cfg.onelap_host = host
-            cfg.onelap_hash_password = hash_pw
-            try:
-                rides = client.list_rides(limit=5)
-            except Exception as exc:  # noqa: BLE001
-                log(f"  login worked but listing rides failed: {exc}")
-                return {"ok": True, "host": host, "hash_password": hash_pw,
-                        "rides": [], "warning": str(exc)}
-            log(f"  found {len(rides)} recent ride(s).")
-            return {
-                "ok": True,
-                "host": host,
-                "hash_password": hash_pw,
-                "rides": [
-                    {
-                        "id": r.ride_id,
-                        "when": r.date_stamp,
-                        "name": r.name,
-                        "has_fit": bool(r.fit_reference()),
-                    }
-                    for r in rides
-                ],
+    log(f"connected to Strava as {who}.")
+    activities = client.list_activities(per_page=8)
+    rides = []
+    for act in activities[:8]:
+        try:
+            detail = client.activity_detail(act.id)
+        except Exception:  # noqa: BLE001
+            detail = act
+        rides.append(
+            {
+                "id": detail.id,
+                "when": detail.date_stamp,
+                "name": detail.name,
+                "sport": detail.sport_type,
+                "device": detail.device_name or "?",
+                "would_sync": _wanted(cfg, detail),
             }
-    log("Could not sign in to any candidate host.")
-    return {"ok": False, "error": "login failed on all candidate hosts"}
+        )
+        log(f"  {detail.date_stamp}  {detail.sport_type:12s}  device={detail.device_name or '?'}  "
+            f"{'[sync]' if _wanted(cfg, detail) else '[skip]'}  {detail.name}")
+    return {"ok": True, "athlete": who, "rides": rides}
 
 
 def sync_once(cfg: Config, log: Log) -> dict:
-    """Pull new Onelap rides and upload them to Garmin Connect. Returns a summary."""
     from .garmin_sync import GarminUploader
     from .state import SyncState
 
-    if not cfg.onelap_ready:
-        return {"ok": False, "error": "onelap credentials missing"}
+    if not cfg.strava_connected:
+        return {"ok": False, "error": "not connected to Strava"}
     if not cfg.garmin_ready:
         return {"ok": False, "error": "garmin credentials missing"}
 
     os.makedirs(cfg.fit_dir, exist_ok=True)
     state = SyncState(cfg.state_file)
+    strava = _strava(cfg)
 
-    onelap = _onelap(cfg)
-    log("signing in to Onelap ...")
-    onelap.login()
-
-    rides = []
-    for page in range(1, cfg.lookback_pages + 1):
-        rides.extend(onelap.list_rides(page=page))
-    new_rides = [r for r in rides if not state.is_synced(r.ride_id)]
-    log(f"{len(rides)} ride(s) listed, {len(new_rides)} new.")
-    summary = {"ok": True, "listed": len(rides), "new": len(new_rides),
+    log("listing recent Strava activities ...")
+    activities = strava.list_activities(per_page=cfg.scan_count)
+    summary = {"ok": True, "listed": len(activities), "new": 0,
                "uploaded": 0, "duplicate": 0, "skipped": 0, "failed": 0}
-    if not new_rides:
-        return summary
 
-    log("connecting to Garmin Connect ...")
-    garmin = GarminUploader(cfg.garmin_email, cfg.garmin_password, cfg.tokenstore,
-                            cfg.garmin_mfa or None)
-    garmin.connect()
-
-    for ride in sorted(new_rides, key=lambda r: r.date_stamp):
-        fit_path = os.path.join(cfg.fit_dir, f"onelap_{ride.date_stamp}_{ride.ride_id}.fit")
+    garmin = None
+    for act in activities:
+        if state.is_synced(act.id):
+            continue
+        # fetch detail (device name) to decide
         try:
-            if not onelap.download_fit(ride, fit_path):
-                log(f"ride {ride.ride_id}: no usable FIT, skipped")
+            detail = strava.activity_detail(act.id)
+        except Exception as exc:  # noqa: BLE001
+            log(f"activity {act.id}: detail fetch failed: {exc}")
+            summary["failed"] += 1
+            continue
+        if not _wanted(cfg, detail):
+            continue
+        summary["new"] += 1
+        try:
+            streams = strava.streams(detail.id)
+            if not streams.get("time"):
+                log(f"activity {detail.id}: no streams (manual entry?), skipping")
                 summary["skipped"] += 1
+                state.mark(detail.id, "skipped")
                 continue
-            result = garmin.upload(fit_path)
-            state.mark(ride.ride_id, result)
+            data = tcx.build_tcx(detail, streams)
+            path = os.path.join(cfg.fit_dir, f"strava_{detail.date_stamp}_{detail.id}.tcx")
+            with open(path, "wb") as fh:
+                fh.write(data)
+
+            if garmin is None:
+                log("connecting to Garmin Connect ...")
+                garmin = GarminUploader(cfg.garmin_email, cfg.garmin_password,
+                                        cfg.tokenstore, cfg.garmin_mfa or None)
+                garmin.connect()
+            result = garmin.upload(path)
+            state.mark(detail.id, result)
             summary[result] = summary.get(result, 0) + 1
-            log(f"ride {ride.ride_id} ({ride.date_stamp}) -> {result}")
+            log(f"{detail.date_stamp}  {detail.name}  -> {result}")
         except Exception as exc:  # noqa: BLE001
             summary["failed"] += 1
-            log(f"ride {ride.ride_id} FAILED: {exc}")
+            log(f"activity {detail.id} FAILED: {exc}")
+    log(f"done: {summary}")
     return summary

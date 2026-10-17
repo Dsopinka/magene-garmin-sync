@@ -1,120 +1,92 @@
 # magene-garmin-sync
 
-Pulls your rides from the **Magene / OnelapFit** cloud and uploads them to
-**Garmin Connect**, so rides recorded on a Magene head unit (e.g. C606 Pro) show
-up in Garmin Connect and count toward your training metrics. Runs headless as a
-Docker container — built for an Unraid server.
+Gets your **Magene** rides into **Garmin Connect** by way of **Strava**.
 
-It only ever reads from your Onelap account and writes to your Garmin account.
-It uses your own credentials, and never sends them anywhere except the two
-services' own login endpoints.
+Your Magene head unit (e.g. C606 Pro) already syncs rides to Strava via the
+OnelapFit app. This tool reads each new ride from Strava through Strava's
+official API — which you authorize — rebuilds it with its GPS, heart rate, power
+and cadence, and uploads it to Garmin Connect. It runs headless as a Docker
+container with a small web control panel, built for an Unraid server.
 
-## Why this, and not the heart-rate merge we first discussed
+It only reads your own Strava activities and writes to your own Garmin account,
+using your own credentials.
 
-Your Magene FIT files already carry heart rate **and** power from the sensors
-paired to the head unit. That HR is better than your watch's optical reading on
-changing-weather rides, so there's nothing to "merge in" — the Magene ride is
-the good one. This tool just gets that ride into Garmin Connect. You keep
-wearing the watch exactly as you do now (it still logs all-day HR, sleep, etc.).
+## Why via Strava
 
-If both your watch and the Magene recorded the same outdoor ride, you'll have
-two activities in Garmin Connect. Delete the watch copy if you want; this tool
-never deletes anything.
+Onelap's cloud API is walled off at the network edge (it only accepts the phone
+app), so a server can't read it directly. Strava is the clean, supported path:
+the rides are already there, and Strava has a real API for your own data.
+
+Reconstructed rides carry all the measurements (GPS, HR, power, cadence,
+altitude), but they aren't the byte-identical Magene original. Garmin may show
+them as imported activities; depending on Garmin's rules, imported non-Garmin
+activities don't always count toward Training Status.
 
 ## How it works
 
-1. Sign in to OnelapFit's international backend with your account + password.
-2. List your recent ride records; skip any already synced (tracked in
-   `/data/sync_state.json`).
-3. Download each new ride's FIT file and upload it to Garmin Connect.
-4. Sleep, then repeat every `POLL_SECONDS`.
+1. Reads your recent activities from Strava.
+2. Keeps the ones you want (cycling only by default; optional device-name filter
+   like `Magene`; virtual/Zwift rides off by default).
+3. For each new ride, pulls its streams and builds a `.tcx` file.
+4. Uploads to Garmin Connect; remembers what's synced (`/data/sync_state.json`).
+5. Repeats on a schedule.
 
-## One-time setup
+## Setup
 
-The Onelap international API has a couple of regional variants. Pin yours down
-once with the built-in `probe` command before running the sync.
+### 1. Create a Strava API application (one time, free)
 
-### 1. Configure
+- Go to <https://www.strava.com/settings/api> and create an app.
+- Set **Authorization Callback Domain** to your server's address, e.g.
+  `192.168.68.117` (the Unraid IP you open the panel at — no `http://`, no port).
+- Note the **Client ID** and **Client Secret**.
 
-```bash
-cp .env.example .env
-# edit .env: ONELAP_ACCOUNT/PASSWORD and GARMIN_EMAIL/PASSWORD
+### 2. Open the panel and connect
+
+- Open `http://<your-server>:8787`.
+- Enter the Strava **Client ID** and **Client Secret**, enter your **Garmin**
+  email/password, click **Save settings**.
+- Click **Connect Strava** → approve on Strava → you're redirected back and it
+  shows **connected**.
+- (Optional) set a **Device filter** like `Magene` to sync only Magene rides,
+  and leave "Cycling only" on. Save.
+- Click **Test Strava** to see your recent rides and which would sync, then
+  **Sync now**. Turn on **Auto-sync** to keep it running.
+
+The panel shows the exact callback address to register, at the bottom.
+
+## Deploy on Unraid
+
+In the Unraid web terminal (`>_`):
+
+```
+mkdir -p /mnt/user/appdata/magene-garmin-sync && cd /mnt/user/appdata/magene-garmin-sync
+curl -fsSL https://github.com/Dsopinka/magene-garmin-sync/archive/refs/heads/main.tar.gz | tar xz --strip-components=1
+docker build -t magene-garmin-sync:0.1.0 .
+docker rm -f magene-garmin-sync 2>/dev/null
+docker run -d --name magene-garmin-sync -p 8787:8787 \
+  -v /mnt/user/appdata/magene-garmin-sync/data:/data \
+  --restart unless-stopped magene-garmin-sync:0.1.0
 ```
 
-### 2. Probe Onelap (confirms host + login format, lists 5 recent rides)
+Then open `http://<unraid-ip>:8787`. The `/data` folder holds your settings,
+Strava/Garmin tokens, and sync state across rebuilds.
 
-```bash
-docker compose run --rm magene-garmin-sync probe
-```
+## Environment variables (all optional — the UI covers everything)
 
-On success it prints a line like:
+| Variable | Notes |
+| --- | --- |
+| `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` | pre-fill the Strava app creds |
+| `GARMIN_EMAIL` / `GARMIN_PASSWORD` | pre-fill Garmin login |
+| `GARMIN_MFA` | 2FA code for a headless Garmin re-login |
+| `DEVICE_FILTER` | e.g. `Magene` |
+| `POLL_SECONDS` | sync interval (default 3600) |
+| `SCAN_COUNT` | recent activities scanned per cycle (default 30) |
+| `TZ` | your timezone |
 
-```
-SUCCESS: host=https://rfs-fitness.rfsvr.com hash_password=False
-  set ONELAP_HOST=https://rfs-fitness.rfsvr.com and ONELAP_HASH_PASSWORD=0
-```
+## Notes
 
-Copy those two values into `.env`. (Pinning them makes every later run fast and
-predictable.) If it lists your recent rides, the Onelap half is working.
-
-> If `probe` can't log in to any candidate host, tell me — the login format may
-> need one tweak, which we confirm against one real request. The endpoint paths
-> are already correct; only the host/auth envelope is in question.
-
-### 3. Garmin login (caches tokens; handles 2FA once)
-
-```bash
-docker compose run --rm magene-garmin-sync garmin-login
-```
-
-If your Garmin account uses 2FA, it prompts for the code. Tokens are cached in
-`/data/garmin_tokens` and auto-refresh for ~a year, so the loop won't need the
-code again.
-
-### 4. Run it
-
-```bash
-docker compose up -d
-docker compose logs -f
-```
-
-### Try a single pass without the loop
-
-```bash
-docker compose run --rm magene-garmin-sync sync
-```
-
-## On Unraid
-
-- Add a container (or use "Compose Manager"), image built from this repo.
-- Map a volume: `/data` → `/mnt/user/appdata/magene-garmin-sync`.
-- Set the `ONELAP_*` and `GARMIN_*` variables in the template.
-- Run `probe` and `garmin-login` once from the container console, then start it.
-
-## Environment variables
-
-| Variable | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `ONELAP_ACCOUNT` | yes | | Email or phone used for OnelapFit |
-| `ONELAP_PASSWORD` | yes | | |
-| `ONELAP_HOST` | no | auto | Set from `probe` output |
-| `ONELAP_HASH_PASSWORD` | no | `0` | Set from `probe` output |
-| `ONELAP_AUTH_SCHEME` | no | empty | e.g. `Bearer ` if required |
-| `GARMIN_EMAIL` | yes | | |
-| `GARMIN_PASSWORD` | yes | | |
-| `GARMIN_MFA` | no | | 2FA code for headless re-login |
-| `POLL_SECONDS` | no | `3600` | Sync interval |
-| `LOOKBACK_PAGES` | no | `1` | Ride-list pages to scan each cycle |
-| `DATA_DIR` | no | `/data` | Token cache, state, FIT files |
-
-## Scope / honesty
-
-- Garmin uploads go through the maintained
-  [`python-garminconnect`](https://pypi.org/project/garminconnect/) library,
-  which uses Garmin's mobile sign-in flow. That half is solid.
-- The Onelap client is an independent implementation against the observed REST
-  interface. The endpoint paths are confirmed; the host and auth envelope are
-  confirmed per-account by `probe`. If Onelap changes its API, the client may
-  need an update.
-- This is for your own data and accounts (interoperability). Don't redistribute
-  anyone's ride data or account access.
+- Garmin uploads use the maintained
+  [`python-garminconnect`](https://pypi.org/project/garminconnect/) library.
+- Keep the panel on your LAN; it's an unauthenticated control panel for your own
+  accounts. Don't expose port 8787 to the internet.
+- For your own data and accounts only.

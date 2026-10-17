@@ -34,11 +34,7 @@ def cmd_serve(cfg: Config) -> int:
 
 def cmd_probe(cfg: Config) -> int:
     result = engine.probe(cfg, log.info)
-    if result.get("ok"):
-        cfg.save()
-        log.info("saved: ONELAP_HOST=%s hash_password=%s", cfg.onelap_host, cfg.onelap_hash_password)
-        return 0
-    return 1
+    return 0 if result.get("ok") else 1
 
 
 def cmd_garmin_login(cfg: Config) -> int:

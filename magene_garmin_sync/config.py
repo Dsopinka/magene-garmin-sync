@@ -1,17 +1,14 @@
 """Configuration.
 
-Settings can come from two places, merged with the stored file winning:
-  1. Environment variables (good for pure-headless / docker-compose use).
-  2. A JSON file at $DATA_DIR/config.json, which the web control panel writes.
-
-This lets you run the container with no secrets in the compose file and type
-your credentials into the web UI instead.
+Settings merge from environment variables and a JSON file at
+$DATA_DIR/config.json (the file, written by the web UI, wins). This lets you run
+the container with no secrets in the compose file and enter everything in the UI.
 """
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 
 def _bool(value, default: bool = False) -> bool:
@@ -30,19 +27,44 @@ def config_path() -> str:
 
 @dataclass
 class Config:
-    onelap_account: str = ""
-    onelap_password: str = ""
-    onelap_host: str = ""
-    onelap_hash_password: bool = False
-    onelap_auth_scheme: str = ""
+    # Strava source (you register a free API app; see README)
+    strava_client_id: str = ""
+    strava_client_secret: str = ""
+    # OAuth tokens, set by the Connect flow (not entered by hand)
+    strava_refresh_token: str = ""
+    strava_access_token: str = ""
+    strava_expires_at: int = 0
 
+    # Which Strava activities to send
+    device_filter: str = ""        # substring match on device name; "" = any
+    include_virtual: bool = False  # include Zwift/virtual rides
+    rides_only: bool = True        # only cycling activities
+
+    # Garmin Connect destination
     garmin_email: str = ""
     garmin_password: str = ""
     garmin_mfa: str = ""
 
     poll_seconds: int = 3600
-    lookback_pages: int = 1
+    scan_count: int = 30           # how many recent Strava activities to scan
     auto_sync: bool = False
+
+    # Fields the web UI may write.
+    EDITABLE = (
+        "strava_client_id",
+        "strava_client_secret",
+        "device_filter",
+        "include_virtual",
+        "rides_only",
+        "garmin_email",
+        "garmin_password",
+        "garmin_mfa",
+        "poll_seconds",
+        "scan_count",
+        "auto_sync",
+    )
+    # Fields persisted to disk (editable + OAuth tokens).
+    PERSIST = EDITABLE + ("strava_refresh_token", "strava_access_token", "strava_expires_at")
 
     @property
     def data_dir(self) -> str:
@@ -61,38 +83,12 @@ class Config:
         return os.path.join(self.data_dir, "fit")
 
     @property
-    def timezone_name(self) -> str:
-        return os.environ.get("TZ") or "UTC"
+    def strava_ready(self) -> bool:
+        return bool(self.strava_client_id and self.strava_client_secret)
 
     @property
-    def language(self) -> str:
-        return os.environ.get("ONELAP_LANGUAGE", "en")
-
-    @property
-    def device_id(self) -> str:
-        """A stable per-install device id (persisted), so the backend sees one device."""
-        path = os.path.join(self.data_dir, "device_id")
-        try:
-            with open(path) as fh:
-                existing = fh.read().strip()
-            if existing:
-                return existing
-        except FileNotFoundError:
-            pass
-        import uuid
-
-        value = str(uuid.uuid4())
-        try:
-            os.makedirs(self.data_dir, exist_ok=True)
-            with open(path, "w") as fh:
-                fh.write(value)
-        except OSError:
-            pass
-        return value
-
-    @property
-    def onelap_ready(self) -> bool:
-        return bool(self.onelap_account and self.onelap_password)
+    def strava_connected(self) -> bool:
+        return bool(self.strava_refresh_token)
 
     @property
     def garmin_ready(self) -> bool:
@@ -100,31 +96,20 @@ class Config:
 
     # -- persistence --------------------------------------------------------
 
-    # Keys the web UI is allowed to write back to config.json.
-    EDITABLE = (
-        "onelap_account",
-        "onelap_password",
-        "onelap_host",
-        "onelap_hash_password",
-        "onelap_auth_scheme",
-        "garmin_email",
-        "garmin_password",
-        "garmin_mfa",
-        "poll_seconds",
-        "lookback_pages",
-        "auto_sync",
-    )
-
     def redacted(self) -> dict:
-        """Config for the UI: passwords replaced by a 'set / not set' flag."""
         out = asdict(self)
-        for secret in ("onelap_password", "garmin_password", "garmin_mfa"):
+        for secret in ("strava_client_secret", "garmin_password", "garmin_mfa"):
             out[f"{secret}_set"] = bool(out.pop(secret))
+        # never expose raw tokens to the browser
+        out.pop("strava_refresh_token", None)
+        out.pop("strava_access_token", None)
+        out.pop("strava_expires_at", None)
+        out["strava_connected"] = self.strava_connected
         return out
 
     def save(self) -> None:
         os.makedirs(self.data_dir, exist_ok=True)
-        payload = {k: getattr(self, k) for k in self.EDITABLE}
+        payload = {k: getattr(self, k) for k in self.PERSIST}
         tmp = config_path() + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(payload, fh, indent=2)
@@ -135,46 +120,49 @@ class Config:
             pass
 
     def update(self, changes: dict) -> None:
+        """Apply user-editable changes (from the web UI)."""
         for key in self.EDITABLE:
             if key not in changes:
                 continue
             value = changes[key]
-            # Blank password fields mean "leave unchanged".
-            if key in ("onelap_password", "garmin_password", "garmin_mfa") and value == "":
-                continue
-            if key in ("onelap_hash_password", "auto_sync"):
+            if key in ("strava_client_secret", "garmin_password", "garmin_mfa") and value == "":
+                continue  # blank = keep current
+            if key in ("include_virtual", "rides_only", "auto_sync"):
                 value = _bool(value)
-            elif key in ("poll_seconds", "lookback_pages"):
+            elif key in ("poll_seconds", "scan_count"):
                 try:
                     value = max(1, int(value))
                 except (TypeError, ValueError):
                     continue
             setattr(self, key, value)
 
-    # -- construction -------------------------------------------------------
+    def set_strava_tokens(self, tokens: dict) -> None:
+        self.strava_refresh_token = str(tokens.get("refresh_token") or self.strava_refresh_token)
+        self.strava_access_token = str(tokens.get("access_token") or "")
+        self.strava_expires_at = int(tokens.get("expires_at") or 0)
+        self.save()
 
     @classmethod
     def load(cls) -> "Config":
         cfg = cls()
-        # 1. environment
         env_map = {
-            "onelap_account": os.environ.get("ONELAP_ACCOUNT"),
-            "onelap_password": os.environ.get("ONELAP_PASSWORD"),
-            "onelap_host": os.environ.get("ONELAP_HOST"),
-            "onelap_hash_password": os.environ.get("ONELAP_HASH_PASSWORD"),
-            "onelap_auth_scheme": os.environ.get("ONELAP_AUTH_SCHEME"),
+            "strava_client_id": os.environ.get("STRAVA_CLIENT_ID"),
+            "strava_client_secret": os.environ.get("STRAVA_CLIENT_SECRET"),
             "garmin_email": os.environ.get("GARMIN_EMAIL"),
             "garmin_password": os.environ.get("GARMIN_PASSWORD"),
             "garmin_mfa": os.environ.get("GARMIN_MFA"),
+            "device_filter": os.environ.get("DEVICE_FILTER"),
             "poll_seconds": os.environ.get("POLL_SECONDS"),
-            "lookback_pages": os.environ.get("LOOKBACK_PAGES"),
+            "scan_count": os.environ.get("SCAN_COUNT"),
             "auto_sync": os.environ.get("AUTO_SYNC"),
         }
         cfg.update({k: v for k, v in env_map.items() if v not in (None, "")})
-        # 2. stored file (wins)
         try:
             with open(config_path()) as fh:
-                cfg.update(json.load(fh))
+                stored = json.load(fh)
+            for key in cls.PERSIST:
+                if key in stored:
+                    setattr(cfg, key, stored[key])
         except (FileNotFoundError, ValueError):
             pass
         return cfg

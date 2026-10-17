@@ -7,8 +7,7 @@ services:
     ports:
       - "8787:8787"          # web control panel -> http://<server>:8787
     environment:
-      # All credentials can be entered in the web UI instead of here.
-      # Anything set here pre-fills the UI (the UI's saved values win).
+      # Everything can be entered in the web UI instead. These just pre-fill it.
       TZ: "${TZ:-America/Toronto}"
     volumes:
       # On Unraid, point this at /mnt/user/appdata/magene-garmin-sync
