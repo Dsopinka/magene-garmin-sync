@@ -39,6 +39,7 @@ class Config:
     device_filter: str = ""        # substring match on device name; "" = any
     include_virtual: bool = False  # include Zwift/virtual rides
     rides_only: bool = True        # only cycling activities
+    skip_garmin_origin: bool = True  # ignore activities that came from Garmin (avoid bounce-back)
 
     # Garmin Connect destination
     garmin_email: str = ""
@@ -56,6 +57,7 @@ class Config:
         "device_filter",
         "include_virtual",
         "rides_only",
+        "skip_garmin_origin",
         "garmin_email",
         "garmin_password",
         "garmin_mfa",
@@ -127,7 +129,7 @@ class Config:
             value = changes[key]
             if key in ("strava_client_secret", "garmin_password", "garmin_mfa") and value == "":
                 continue  # blank = keep current
-            if key in ("include_virtual", "rides_only", "auto_sync"):
+            if key in ("include_virtual", "rides_only", "auto_sync", "skip_garmin_origin"):
                 value = _bool(value)
             elif key in ("poll_seconds", "scan_count"):
                 try:

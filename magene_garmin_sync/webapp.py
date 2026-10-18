@@ -172,6 +172,7 @@ Garmin Connect. Everything is stored on this server only. <span id="ver"></span>
   <input id="device_filter" type="text" placeholder="e.g. Magene">
   <label class="chk"><input id="rides_only" type="checkbox"> Cycling activities only</label>
   <label class="chk"><input id="include_virtual" type="checkbox"> Include virtual rides (Zwift)</label>
+  <label class="chk"><input id="skip_garmin_origin" type="checkbox"> Skip activities that came from Garmin (avoid bounce-back)</label>
   <div class="row" style="margin-top:12px">
     <div><label>Sync every (seconds)</label><input id="poll_seconds" type="number" min="300" value="3600"></div>
     <div><label>Activities to scan</label><input id="scan_count" type="number" min="1" value="30"></div>
@@ -198,7 +199,7 @@ Garmin Connect. Everything is stored on this server only. <span id="ver"></span>
 <script>
 const $=id=>document.getElementById(id);
 const TEXT=["strava_client_id","garmin_email","garmin_mfa","device_filter","poll_seconds","scan_count"];
-const CHECKS=["rides_only","include_virtual","auto_sync"];
+const CHECKS=["rides_only","include_virtual","skip_garmin_origin","auto_sync"];
 let loaded=false;
 function collect(){
   const o={};

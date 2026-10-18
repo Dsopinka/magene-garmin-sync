@@ -27,6 +27,8 @@ def _strava(cfg: Config) -> StravaClient:
 
 
 def _wanted(cfg: Config, act) -> bool:
+    if cfg.skip_garmin_origin and act.from_garmin:
+        return False
     if cfg.rides_only and not act.is_ride:
         return False
     if act.is_virtual and not cfg.include_virtual:

@@ -42,7 +42,13 @@ class Activity:
     sport_type: str
     start_date: str          # ISO8601 UTC, e.g. 2026-10-14T16:48:30Z
     device_name: str = ""
+    external_id: str = ""    # original upload filename; Garmin pushes start "garmin_push_"
     raw: dict = field(default_factory=dict)
+
+    @property
+    def from_garmin(self) -> bool:
+        """True if this Strava activity was uploaded from Garmin (so we skip it)."""
+        return self.external_id.lower().startswith("garmin") or "garmin" in self.device_name.lower()
 
     @property
     def start_dt(self) -> datetime:
@@ -205,6 +211,7 @@ class StravaClient:
             sport_type=str(raw.get("sport_type") or raw.get("type") or ""),
             start_date=str(raw.get("start_date") or ""),
             device_name=str(raw.get("device_name") or ""),
+            external_id=str(raw.get("external_id") or ""),
             raw=raw,
         )
 
